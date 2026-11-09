@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Keep in Touch · Browser checks</title>
+<h1>Browser workflow checks</h1>
+<p>Run on a separate test port, never your normal app address. These checks use fictional data and remove it afterward. They refuse to run if saved app data already exists at this address.</p>
+<pre id="results">Running…</pre>
+<iframe id="app" title="App under test" style="width:100%;height:900px;border:1px solid #ccc"></iframe>
+<script>
+(async () => {
+  const OLD = "keep-in-touch-follow-ups-v1";
+  const NEW = "keep-in-touch-relationships-v2";
+  const results = document.querySelector("#results");
+  const frame = document.querySelector("#app");
+  const messages = [];
+  let ownsData = false;
+  const assert = (condition, message) => { if (!condition) throw Error(message); };
+  const pass = message => { messages.push("PASS: " + message); results.textContent = messages.join("\n"); };
+  const tick = () => new Promise(resolve => setTimeout(resolve, 30));
+  const load = () => new Promise((resolve, reject) => {
+    frame.onload = resolve;
+    frame.onerror = () => reject(Error("App failed to load"));
+    frame.src = "../app/index.html?check=" + Date.now();
+  });
+  const doc = () => frame.contentDocument;
+  const find = selector => doc().querySelector(selector);
+  const data = () => JSON.parse(localStorage.getItem(NEW));
+  function click(label, within = doc()) {
+    const control = [...within.querySelectorAll("button")].find(button => button.textContent === label);
+    assert(control && !control.disabled, "Missing or disabled button: " + label);
+    control.click();
+  }
+  function input(name, value) {
+    const control = find('[name="' + name + '"]');
+    assert(control, "Missing field: " + name);
+    control.value = value;
+    control.dispatchEvent(new frame.contentWindow.Event("input", { bubbles: true }));
+  }
+  async function save() {
+    find("#editor-form").requestSubmit();
+    await tick();
+  }
+  try {
+    assert(location.protocol === "http:", "Serve this page over local HTTP.");
+    assert(localStorage.getItem(OLD) === null && localStorage.getItem(NEW) === null, "Saved app data exists here. Checks refused. Use a separate test port or browser profile.");
+    ownsData = true;
+    const original = JSON.stringify([
+      { id: "first", person: "Taylor Demo", context: "Ask about a fictional book club.", date: "2026-11-10", done: false },
+      { id: "second", person: "Taylor Demo", context: "Imaginary picnic recipe shared.", date: "2026-11-12", done: true }
+    ]);
+    localStorage.setItem(OLD, original);
+    await load();
+    assert(data().people.length === 1 && data().followUps.length === 2, "Migration counts");
+    assert(find("#profile").textContent.includes("Done"), "Migrated completed state");
+    assert(localStorage.getItem(OLD) === original, "Old backup changed");
+    pass("Old follow-ups migrate into one profile, with context, dates, completion and backup preserved.");
+
+    click("+ Add a person");
+    input("name", "   ");
+    await save();
+    assert(find("#editor").open && data().people.length === 1, "Whitespace-only name accepted");
+    input("name", "Robin Fiction");
+    input("metWhere", "Imaginary library");
+    input("metHow", "A fictional study group");
+    input("introducedBy", "Morgan Example");
+    input("lastInteractionDate", "2026-11-08");
+    input("lastInteractionType", "Video call");
+    for (const category of ["Friend", "Classmate"]) find('[value="' + category + '"]').checked = true;
+    await save();
+    assert(!find("#editor").open, "Editor did not close");
+    const robin = data().people.find(person => person.name === "Robin Fiction");
+    assert(robin && robin.categories.length === 2, "Multiple categories not saved");
+    assert(find("#profile").textContent.includes("Imaginary library") && find("#profile").textContent.includes("Video call"), "Profile details missing");
+    pass("Profile creation, required-name validation, meeting details, multiple categories and recent interaction.");
+
+    click("+ Add note");
+    input("text", "<script>window.unwanted = true;<\/script> A fictional hobby.");
+    await save();
+    assert(find("#profile").textContent.includes("<script>"), "Note not shown as literal text");
+    assert(!find("#profile script"), "Note became executable markup");
+    click("Edit note");
+    input("text", "Enjoys imaginary watercolors.");
+    await save();
+    assert(data().notes[0].text === "Enjoys imaginary watercolors.", "Note edit failed");
+    pass("Notes can be created and edited; markup is displayed as text.");
+
+    click("+ Add follow-up");
+    input("context", "Ask about the fictional watercolor class.");
+    await save();
+    assert(data().followUps.at(-1).date === "", "Optional date was not empty");
+    assert(find("#undated-list").textContent.includes("watercolor"), "Undated follow-up missing from overview");
+    click("Edit follow-up", find("#profile"));
+    input("context", "Share an imaginary art book.");
+    input("date", "2026-11-20");
+    await save();
+    assert(find("#upcoming-list").textContent.includes("art book"), "Dated follow-up missing from overview");
+    click("Mark as done", find("#profile"));
+    assert(!find("#upcoming-list").textContent.includes("art book"), "Done item remained upcoming");
+    click("Mark as not done", find("#profile"));
+    assert(find("#upcoming-list").textContent.includes("art book"), "Reopened item missing");
+    pass("Undated and dated follow-ups, editing, completion and reopening update the overview.");
+
+    click("Edit profile");
+    input("name", "Robin Renamed");
+    await save();
+    assert(data().notes[0].personId === robin.id && data().followUps.at(-1).personId === robin.id, "Rename broke links");
+    click("Edit profile");
+    input("name", "Unsaved change");
+    click("Cancel");
+    await tick();
+    assert(data().people.some(person => person.name === "Robin Renamed"), "Cancel saved the edit");
+    await load();
+    click("Robin Renamed", find("#upcoming-list"));
+    assert(find("#profile").textContent.includes("watercolors"), "Note missing after refresh");
+    assert(find("#profile").textContent.includes("art book"), "Follow-up missing after refresh");
+    pass("Renaming keeps linked items; cancel leaves saved data unchanged; refresh preserves entries; overview opens the right person.");
+
+    frame.style.width = "350px";
+    await tick();
+    assert(doc().documentElement.scrollWidth <= frame.contentWindow.innerWidth, "Phone layout scrolls horizontally");
+    click("Edit profile");
+    await tick();
+    const dialogBounds = find("#editor").getBoundingClientRect();
+    assert(dialogBounds.left >= 0 && dialogBounds.right <= frame.contentWindow.innerWidth, "Editor extends beyond phone viewport");
+    assert(find("#editor").contains(doc().activeElement), "Editor did not receive keyboard focus");
+    click("Cancel");
+    await tick();
+    frame.style.width = "100%";
+    pass("Phone-sized page and editing dialog fit the viewport; opening the editor moves focus inside.");
+
+    click("Delete profile");
+    assert(find("#delete-dialog").open && find("#delete-description").textContent.includes("all of its notes and follow-ups"), "Profile deletion warning missing");
+    click("Keep it");
+    await tick();
+    assert(data().people.length === 2 && data().notes.length === 1, "Cancel deleted information");
+    pass("Profile deletion requires confirmation, and Keep it preserves all information.");
+
+    click("Delete note");
+    click("Delete", find("#delete-dialog"));
+    await tick();
+    assert(data().notes.length === 0, "Note deletion failed");
+    click("Delete follow-up", find("#profile"));
+    click("Delete", find("#delete-dialog"));
+    await tick();
+    assert(data().followUps.length === 2, "Follow-up deletion failed");
+    click("+ Add note");
+    input("text", "Another imaginary note to test profile deletion.");
+    await save();
+    click("+ Add follow-up");
+    input("context", "Another imaginary follow-up.");
+    await save();
+    click("Delete profile");
+    click("Delete", find("#delete-dialog"));
+    await tick();
+    assert(data().people.length === 1 && data().notes.length === 0 && data().followUps.length === 2, "Profile cascade failed");
+    assert(data().people[0].name === "Taylor Demo", "Another profile was affected");
+    click("Delete profile");
+    click("Delete", find("#delete-dialog"));
+    await tick();
+    await load();
+    assert(data().people.length === 0 && data().followUps.length === 0, "Empty app reimported old backup");
+    pass("Notes, follow-ups and profiles delete correctly; other profiles stay intact; deleting everything survives reload without reimporting the backup.");
+    pass("All browser workflow checks passed.");
+    results.dataset.result = "passed";
+  } catch (error) {
+    messages.push("FAIL: " + error.message);
+    results.textContent = messages.join("\n");
+    results.dataset.result = "failed";
+  } finally {
+    if (ownsData) {
+      localStorage.removeItem(OLD);
+      localStorage.removeItem(NEW);
+    }
+  }
+})();
+</script>
+</html>
